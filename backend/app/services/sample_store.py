@@ -24,6 +24,22 @@ class SampleStoreService(BaseModuleService):
 
     # ---- 业务扩展：样本留存与指纹去重 ----
 
+    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        """登记样本时按 站点+指纹 生成独立来源引用。
+
+        同规格但不同站点的样本绝不共享来源引用，避免模板升级时顺着引用串站。
+        """
+        entry, missing = super().create_entry(values)
+        if entry is None:
+            return entry, missing
+        if not entry.get("来源引用"):
+            site = str(entry.get("站点名称", "") or "unknown")
+            fp = str(entry.get("样本指纹", "") or entry.get("id"))
+            entry["来源引用"] = f"SRC-{site}-{fp}-{entry.get('id')}"
+        if not entry.get("source_ref"):
+            entry["source_ref"] = entry["来源引用"]
+        return entry, missing
+
     def mark_parsed(self, entry_id: int) -> dict[str, Any]:
         """标记样本已解析并联动解析量指标。"""
         entry = store.find(self.MODULE, entry_id)

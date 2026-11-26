@@ -10,6 +10,8 @@ class BaseModuleService:
     MODULE = ""
     ENTITY = ""
     LIST_FIELDS: list[str] = []
+    # 列表字段之外允许参与精确/模糊过滤的关系字段（如站点名称、模板版本）。
+    FILTER_FIELDS: list[str] = []
     REQUIRED_FIELDS: list[str] = []
     STATUS_ORDER: list[str] = []
     ACTION_RULES: dict[str, str] = {}
@@ -25,8 +27,9 @@ class BaseModuleService:
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
         rows = list(store.rows(self.MODULE))
+        filter_fields = set(self.LIST_FIELDS) | set(self.FILTER_FIELDS)
         for field, expected in (filters or {}).items():
-            if field in self.LIST_FIELDS:
+            if field in filter_fields:
                 rows = [
                     row for row in rows
                     if expected.casefold() in str(row.get(field, "")).casefold()
@@ -51,13 +54,29 @@ class BaseModuleService:
         if missing:
             return None, missing
         rows = store.rows(self.MODULE)
-        entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
-        entry.update({field: values.get(field) for field in self.LIST_FIELDS})
-        entry["status"] = self.STATUS_ORDER[0]
-        entry["pending"] = True
-        entry["abnormal"] = False
+        entry_id = max((int(row.get("id", 0)) for row in rows), default=0) + 1
+        entry: dict[str, Any] = {"id": entry_id}
+        # 先保留调用方提交的全部领域字段（模板版本、来源引用、价格关联等），
+        # 再保证列表字段键存在，额外字段会随详情/列表一起返回。
+        for key, value in (values or {}).items():
+            if key in ("id",):
+                continue
+            entry[key] = value
+        for field in self.LIST_FIELDS:
+            entry.setdefault(field, values.get(field, ""))
+        entry["id"] = entry_id
+        entry.setdefault("status", self.STATUS_ORDER[0] if self.STATUS_ORDER else "")
+        entry.setdefault("pending", True)
+        entry.setdefault("abnormal", False)
         rows.append(entry)
         return entry, []
+
+    def handle_action(
+        self, entry_id: int, action: str, payload: Any | None = None
+    ) -> dict[str, Any]:
+        """动作统一入口：默认走状态流转，子服务可覆盖以返回富回执。"""
+        entry, message = self.run_action(entry_id, action)
+        return {"ok": entry is not None, "message": message, "entry": entry}
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(self.MODULE, entry_id)

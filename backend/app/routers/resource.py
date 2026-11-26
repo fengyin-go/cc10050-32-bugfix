@@ -31,10 +31,11 @@ def list_entries(
     size: int = Query(default=20, ge=1, le=200),
 ) -> PageResult[dict]:
     service = require_service(module)
+    allowed_filters = set(service.LIST_FIELDS) | set(getattr(service, "FILTER_FIELDS", set()))
     filters = {
         key: value.strip()
         for key, value in request.query_params.items()
-        if key in service.LIST_FIELDS and value.strip()
+        if key in allowed_filters and value.strip()
     }
     items, total = service.list_entries(
         filters=filters, keyword=keyword, status=status, page=page, size=size)
@@ -49,10 +50,11 @@ def export_entries(
     status: str | None = Query(default=None),
 ) -> StreamingResponse:
     service = require_service(module)
+    allowed_filters = set(service.LIST_FIELDS) | set(getattr(service, "FILTER_FIELDS", set()))
     filters = {
         key: value.strip()
         for key, value in request.query_params.items()
-        if key in service.LIST_FIELDS and value.strip()
+        if key in allowed_filters and value.strip()
     }
     items, _ = service.list_entries(
         filters=filters, keyword=keyword, status=status, page=1, size=1_000_000)
@@ -91,8 +93,45 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
 
 
-@router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
-def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
+@router.post("/{module}/{entry_id}/actions")
+def run_action(module: str, entry_id: int, payload: ActionPayload) -> dict:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    # 领域服务返回完整字典：除 ok/message/entry 外，还可携带影响范围与重算回执。
+    return service.handle_action(entry_id, payload.action.strip(), payload)
+
+
+# 语义化动词别名：部分调用方/用例可能直接 POST /api/<module>/<id>/recompute 等路径。
+VERB_METHODS = {
+    "upgrade": "bump_version",
+    "bump": "bump_version",
+    "bump-version": "bump_version",
+    "impact": "check_impact",
+    "check-impact": "check_impact",
+    "continue": "continue_old_recompute",
+    "continue-old": "continue_old_recompute",
+    "recompute": "recompute_baseline",
+    "confirm": "confirm_price",
+    "confirm-price": "confirm_price",
+    "run": "run_compare",
+    "run-compare": "run_compare",
+    "compare": "run_compare",
+}
+
+
+@router.post("/{module}/{entry_id}/{verb}")
+def run_verb(module: str, entry_id: int, verb: str) -> dict:
+    service = require_service(module)
+    method_name = VERB_METHODS.get(verb) or VERB_METHODS.get(verb.replace("_", "-"))
+    method = getattr(service, method_name, None) if method_name else None
+    if method is None:
+        raise HTTPException(status_code=404, detail=f"未知操作：{verb}")
+    return method(entry_id)
+
+
+@router.get("/{module}/{entry_id}/impact")
+def get_impact(module: str, entry_id: int) -> dict:
+    service = require_service(module)
+    method = getattr(service, "check_impact", None) or getattr(service, "impact_for_baseline", None)
+    if method is None:
+        raise HTTPException(status_code=404, detail=f"{module} 不支持影响范围核对")
+    return method(entry_id)
